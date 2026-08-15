@@ -1,0 +1,87 @@
+name: Publish PyPI package and MCP Registry metadata
+
+env:
+  MCP_PUBLISHER_VERSION: v1.8.1
+  MCP_PUBLISHER_LINUX_AMD64_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: publish-mcp-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify release versions
+        run: python scripts/check-release-version.py
+
+      - name: Run public hygiene gate
+        run: bash scripts/hygiene-check.sh
+
+      - name: Install package and build tools
+        run: python -m pip install . build twine
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Run stdio smoke test
+        run: TVSUB_TEST_PYTHON="$(command -v python)" python tests/stdio_smoke.py
+
+      - name: Build and inspect distributions
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish package to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Wait for the package to become readable on PyPI
+        run: |
+          package_version=${GITHUB_REF_NAME#v}
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error \
+              "https://pypi.org/pypi/tvsub-mcp/${package_version}/json" >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "PyPI package did not become readable in time" >&2
+          exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          archive=mcp-publisher_linux_amd64.tar.gz
+          curl --fail --location --show-error \
+            --output "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${archive}"
+          printf '%s  %s\n' "$MCP_PUBLISHER_LINUX_AMD64_SHA256" "$archive" | sha256sum --check -
+          tar xzf "$archive" mcp-publisher
+          chmod 0755 mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Validate MCP Registry metadata
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to the MCP Registry with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

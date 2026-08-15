@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvsub-mcp"
+version = "0.1.0"
+description = "MCP companion for the tvsub subtitle overlay on Apple TV.app for macOS"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "subtitles", "macos", "apple-tv"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "mcp>=1.2,<2",
+  "anthropic>=0.117,<1",
+]
+
+[project.urls]
+Homepage = "https://youngji.kim/tvsub"
+Repository = "https://github.com/launzi/tvsub-mcp"
+Issues = "https://github.com/launzi/tvsub-mcp/issues"
+
+[project.scripts]
+tvsub-mcp = "tvsub_mcp.server:main"
+
+[tool.setuptools.package-data]
+tvsub_mcp = ["helpers/*.swift"]
+
