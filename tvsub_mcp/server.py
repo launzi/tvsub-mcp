@@ -33,7 +33,7 @@ def build_server(service: TvsubService) -> FastMCP:
         ),
     )
 
-    @mcp.tool(description="MediaRemote/JXA로 현재 TV.app 제목, 콘텐츠 ID, 위치와 재생 상태를 조회합니다.")
+    @mcp.tool(description="MediaRemote/JXA와 TV.app AppleScript 교차 검증으로 현재 제목, 콘텐츠 ID, 위치와 재생 상태를 조회합니다.")
     def now_playing() -> dict:
         return service.now_playing()
 
@@ -56,7 +56,10 @@ def build_server(service: TvsubService) -> FastMCP:
     ) -> dict:
         return service.translate_subtitle(subtitle, target_language, dry_run, force, batch_size, glossary)
 
-    @mcp.tool(description="tvsub NSPanel 오버레이를 선택 자막·스타일로 시작합니다.")
+    @mcp.tool(description=(
+        "tvsub NSPanel 오버레이를 선택 자막·스타일로 시작합니다. "
+        "bottom_margin은 TV 영상 창 높이 기준이며 창을 찾지 못할 때만 설정 화면 기준으로 폴백합니다."
+    ))
     def start_overlay(
         subtitle: str = "",
         store_id: str = "",
@@ -78,10 +81,10 @@ def build_server(service: TvsubService) -> FastMCP:
         return service.list_fonts(language)
 
     @mcp.tool(description=(
-        "폰트·크기·색·외곽선·화면 하단 위치를 저장하고 실행 중 오버레이에 즉시 반영합니다. "
+        "폰트·크기·색·외곽선·TV 영상 창 하단 위치를 저장하고 실행 중 오버레이에 즉시 반영합니다. "
         "outline_width는 pt가 아니라 **폰트 크기 대비 퍼센트**입니다(5 = 5%). 4~7이 실용 범위이고, "
         "10을 넘기면 글자 속까지 외곽선 색으로 덮여 읽기 어려워집니다. "
-        "bottom_margin은 화면 높이 대비 비율(0.075 = 7.5%)입니다."
+        "bottom_margin은 TV 영상 창 높이 대비 비율(0.075 = 7.5%)이며 창 취득 실패 때만 화면 기준입니다."
     ))
     def set_style(
         font_family: str = "",
@@ -116,7 +119,9 @@ def build_server(service: TvsubService) -> FastMCP:
     ) -> dict:
         return service.calibrate_sync(spoken_text, subtitle_time, store_id, actual_time)
 
-    @mcp.tool(description="오버레이, 재생 항목, 선택 자막, 싱크 보정과 스타일을 한 번에 요약합니다.")
+    @mcp.tool(description=(
+        "오버레이, 재생 항목, 선택 자막, 싱크 보정, 스타일과 창 기준 위치 추적 계약을 한 번에 요약합니다."
+    ))
     def status() -> dict:
         return service.status()
 

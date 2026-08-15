@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
-from tvsub_mcp.service import TvsubService
+from tvsub_mcp.service import TvsubService, should_use_applescript_position
 
 
 SRT = """1
@@ -20,6 +22,85 @@ Late line
 
 
 class ServiceTests(unittest.TestCase):
+    def test_cross_source_threshold_matches_swift_rule(self) -> None:
+        self.assertTrue(should_use_applescript_position(35.8, 300.1))
+        self.assertFalse(should_use_applescript_position(100.0, 101.999))
+        self.assertFalse(should_use_applescript_position(100.0, 102.0))
+        self.assertTrue(should_use_applescript_position(100.0, 102.001))
+
+    def test_live_now_playing_uses_tv_applescript_on_disagreement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "src" / "nowplaying.js").write_text("fixture", encoding="utf-8")
+            media_remote = SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    '{"bundleID":"com.apple.TV","app":"TV",'
+                    '"kMRMediaRemoteNowPlayingInfoTitle":"Example",'
+                    '"kMRMediaRemoteNowPlayingInfoElapsedTime":35.8,'
+                    '"kMRMediaRemoteNowPlayingInfoTimestamp":0,'
+                    '"kMRMediaRemoteNowPlayingInfoPlaybackRate":1,'
+                    '"kMRMediaRemoteNowPlayingInfoDuration":1000}'
+                ),
+                stderr="",
+            )
+            service = TvsubService(root)
+            with patch("tvsub_mcp.service.platform.system", return_value="Darwin"), \
+                 patch("tvsub_mcp.service.subprocess.run", return_value=media_remote), \
+                 patch.object(service, "_tv_player_ground_truth", return_value=(300.1, "playing")):
+                playback = service.now_playing()
+            self.assertTrue(playback["sync_disagreement"])
+            self.assertEqual(playback["location_ms"], 300_100)
+            self.assertEqual(playback["media_remote_location_ms"], 35_800)
+            self.assertEqual(playback["source"], "AppleScript/TV (MediaRemote disagreement)")
+
+    def test_live_now_playing_quietly_falls_back_when_applescript_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            (root / "src" / "nowplaying.js").write_text("fixture", encoding="utf-8")
+            media_remote = SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    '{"bundleID":"com.apple.TV",'
+                    '"kMRMediaRemoteNowPlayingInfoElapsedTime":35.8,'
+                    '"kMRMediaRemoteNowPlayingInfoTimestamp":0,'
+                    '"kMRMediaRemoteNowPlayingInfoPlaybackRate":0}'
+                ),
+                stderr="",
+            )
+            service = TvsubService(root)
+            with patch("tvsub_mcp.service.platform.system", return_value="Darwin"), \
+                 patch("tvsub_mcp.service.subprocess.run", return_value=media_remote), \
+                 patch.object(service, "_tv_player_ground_truth", side_effect=subprocess.TimeoutExpired("osascript", 2)):
+                playback = service.now_playing()
+            self.assertFalse(playback["sync_disagreement"])
+            self.assertEqual(playback["location_ms"], 35_800)
+            self.assertEqual(playback["source"], "MediaRemote/JXA")
+
+    def test_calibration_refuses_disagreeing_anchor_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "subtitles").mkdir()
+            (root / "subtitles" / "sample.srt").write_text(SRT, encoding="utf-8")
+            service = TvsubService(root, mock=True)
+            service.load_subtitle("sample.srt", "movie-1")
+            config_path = root / "config" / "movie-movie-1.json"
+            before = config_path.read_text(encoding="utf-8")
+            disagreement = {
+                "is_playing": False,
+                "location_ms": 300_100,
+                "sync_disagreement": True,
+                "media_remote_location_ms": 35_800,
+                "apple_script_location_ms": 300_100,
+            }
+            with patch.object(service, "now_playing", return_value=disagreement):
+                result = service.calibrate_sync("First line", store_id="movie-1")
+            self.assertFalse(result["anchor_recorded"])
+            self.assertEqual(result["reason"], "mediaremote-applescript-disagreement")
+            self.assertEqual(config_path.read_text(encoding="utf-8"), before)
+
     def test_mock_flow_and_compatible_movie_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -45,8 +126,17 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(started["started"])
             self.assertEqual(started["subtitle"], "subtitles/sample.srt")
             self.assertNotIn(str(root), str(service.status()))
-            style = service.set_style(font_family="Apple SD Gothic Neo", font_size=52, language="ko")
+            style = service.set_style(
+                font_family="Apple SD Gothic Neo", font_size=52,
+                bottom_margin=0.09, language="ko",
+            )
             self.assertTrue(style["applies_live"])
+            self.assertEqual(style["positioning"]["reference"], "tv-video-window")
+            self.assertEqual(style["positioning"]["bottom_margin_ratio"], 0.09)
+            self.assertEqual(style["positioning"]["fallback"], "configured-screen")
+            status = service.status()
+            self.assertEqual(status["positioning"], style["positioning"])
+            self.assertEqual(status["positioning"]["screen_index_role"], "fallback-only")
             self.assertTrue(service.stop_overlay()["stopped"])
 
     def test_start_overlay_movie_override_does_not_bypass_tv_source_filter(self) -> None:

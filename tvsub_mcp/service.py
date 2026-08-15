@@ -42,6 +42,16 @@ LANGUAGE_SAMPLES = {
     "th": "คำบรรยายไทย",
     "hi": "हिन्दी उपशीर्षक",
 }
+PLAYBACK_SYNC_THRESHOLD = 2.0
+
+
+def should_use_applescript_position(
+    media_remote_position: float,
+    apple_script_position: float,
+    threshold: float = PLAYBACK_SYNC_THRESHOLD,
+) -> bool:
+    """Return True only when the independent TV.app position differs beyond the shared threshold."""
+    return abs(media_remote_position - apple_script_position) > threshold
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -90,6 +100,15 @@ class TvsubService:
             elapsed = float(os.getenv("TVSUB_MOCK_ELAPSED", "65.0"))
             rate = float(os.getenv("TVSUB_MOCK_RATE", "0"))
             bundle_id = os.getenv("TVSUB_MOCK_BUNDLE_ID", "com.apple.TV") or None
+            disagreement = False
+            media_remote_elapsed = elapsed
+            apple_script_elapsed = os.getenv("TVSUB_MOCK_AS_ELAPSED")
+            if bundle_id == "com.apple.TV" and apple_script_elapsed is not None:
+                as_elapsed = float(apple_script_elapsed)
+                disagreement = should_use_applescript_position(elapsed, as_elapsed)
+                if disagreement:
+                    elapsed = as_elapsed
+                    rate = 1.0 if os.getenv("TVSUB_MOCK_AS_STATE", "paused") == "playing" else 0.0
             return {
                 "title": os.getenv("TVSUB_MOCK_TITLE", "Example Movie (Mock)"),
                 "store_id": os.getenv("TVSUB_MOCK_STORE_ID", "fixture-movie-001"),
@@ -100,7 +119,12 @@ class TvsubService:
                 "app": os.getenv("TVSUB_MOCK_APP", "TV"),
                 "bundle_id": bundle_id,
                 "is_tv_app": bundle_id == "com.apple.TV",
-                "source": "mock",
+                "source": "mock/AppleScript" if disagreement else "mock",
+                "sync_disagreement": disagreement,
+                "media_remote_location_ms": round(media_remote_elapsed * 1000),
+                "apple_script_location_ms": (
+                    round(float(apple_script_elapsed) * 1000) if apple_script_elapsed is not None else None
+                ),
             }
         if platform.system() != "Darwin":
             raise RuntimeError("MediaRemote 조회는 macOS에서만 가능합니다. Linux에서는 --mock을 사용하세요.")
@@ -140,6 +164,21 @@ class TvsubService:
         if duration > 0:
             elapsed = min(elapsed, duration)
         bundle_id = payload.get("bundleID")
+        source = "MediaRemote/JXA"
+        disagreement = False
+        media_remote_elapsed = elapsed
+        apple_script_elapsed: float | None = None
+        if bundle_id == "com.apple.TV":
+            try:
+                apple_script_elapsed, apple_script_state = self._tv_player_ground_truth()
+            except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
+                pass
+            else:
+                disagreement = should_use_applescript_position(elapsed, apple_script_elapsed)
+                if disagreement:
+                    elapsed = apple_script_elapsed
+                    rate = 1.0 if apple_script_state == "playing" else 0.0
+                    source = "AppleScript/TV (MediaRemote disagreement)"
         return {
             "title": payload.get("kMRMediaRemoteNowPlayingInfoTitle"),
             "store_id": str(
@@ -154,8 +193,37 @@ class TvsubService:
             "app": payload.get("app"),
             "bundle_id": bundle_id,
             "is_tv_app": bundle_id == "com.apple.TV",
-            "source": "MediaRemote/JXA",
+            "source": source,
+            "sync_disagreement": disagreement,
+            "media_remote_location_ms": round(max(0, media_remote_elapsed) * 1000),
+            "apple_script_location_ms": (
+                round(max(0, apple_script_elapsed) * 1000) if apple_script_elapsed is not None else None
+            ),
         }
+
+    def _tv_player_ground_truth(self) -> tuple[float, str]:
+        completed = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e", "with timeout of 1 second",
+                "-e", 'tell application "TV"',
+                "-e", "set p to player position",
+                "-e", "set s to player state as text",
+                "-e", "return (p as text) & tab & s",
+                "-e", "end tell",
+                "-e", "end timeout",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("TV.app AppleScript 조회 실패")
+        fields = completed.stdout.strip().split("\t", 1)
+        if len(fields) != 2 or fields[1] not in {"playing", "paused", "stopped"}:
+            raise ValueError("TV.app AppleScript 응답 형식 오류")
+        return max(0.0, float(fields[0])), fields[1]
 
     def _resolve_subtitle(self, value: str) -> Path:
         candidate = Path(value).expanduser()
@@ -283,7 +351,7 @@ class TvsubService:
             }
         if platform.system() != "Darwin":
             raise RuntimeError("폰트 열거는 macOS에서만 가능합니다. Linux에서는 --mock을 사용하세요.")
-        helper = Path(__file__).resolve().parent / "helpers" / "list-fonts.swift"
+        helper = self.server_dir / "helpers" / "list-fonts.swift"
         completed = subprocess.run(
             ["/usr/bin/xcrun", "swift", str(helper), "--language", tag, "--sample", sample],
             capture_output=True,
@@ -333,7 +401,7 @@ class TvsubService:
             settings["outlineWidth"] = outline_width
         if bottom_margin >= 0:
             if not 0 <= bottom_margin <= 0.30:
-                raise ValueError("bottom_margin은 화면 높이 비율 0~0.30이어야 합니다.")
+                raise ValueError("bottom_margin은 TV 영상 창 높이 비율 0~0.30이어야 합니다.")
             settings["bottomMargin"] = bottom_margin
         if background_alpha >= 0:
             if not 0 <= background_alpha <= 1:
@@ -349,7 +417,18 @@ class TvsubService:
             "control_channel": "atomic settings.json write + tvsub mtime watch",
             "applies_live": self.overlay_status()["running"],
             "settings": settings,
+            "positioning": self._positioning_metadata(settings),
             "warnings": warnings,
+        }
+
+    @staticmethod
+    def _positioning_metadata(settings: dict) -> dict:
+        return {
+            "reference": "tv-video-window",
+            "bottom_margin_ratio": settings.get("bottomMargin", DEFAULT_SETTINGS["bottomMargin"]),
+            "tracking_interval_seconds": 0.5,
+            "fallback": "configured-screen",
+            "screen_index_role": "fallback-only",
         }
 
     def _is_live_tvsub(self, pid: int) -> bool:
@@ -518,8 +597,19 @@ class TvsubService:
                 return {"anchor_recorded": False, "needs_selection": True, "reason": "multiple-cues",
                         "candidates": [{"subtitle_time": item.start, "text": item.flat_text} for item in matches[:20]]}
             cue = matches[0]
+        playback = self.now_playing()
+        if playback.get("sync_disagreement"):
+            return {
+                "anchor_recorded": False,
+                "reason": "mediaremote-applescript-disagreement",
+                "media_remote_location_ms": playback.get("media_remote_location_ms"),
+                "apple_script_location_ms": playback.get("apple_script_location_ms"),
+                "suggestion": (
+                    "MediaRemote와 TV.app 위치가 일치하지 않아 앵커를 저장하지 않았습니다. "
+                    "TV.app에서 pause→play로 재동기화한 뒤 다시 일시정지하고 재시도하세요."
+                ),
+            }
         if actual_time < 0:
-            playback = self.now_playing()
             if playback["is_playing"]:
                 raise ValueError("정확한 앵커를 위해 TV.app을 일시정지한 뒤 다시 호출하세요.")
             actual_time = float(playback["location_ms"]) / 1000
@@ -556,12 +646,14 @@ class TvsubService:
             playback = {"available": False, "error": self._public_error(exc)}
             movie_id = ""
         config = self._movie_config(movie_id) if movie_id else None
+        settings = self._settings()
         return self._public_payload({
             "overlay": self.overlay_status(),
             "now_playing": playback,
             "subtitle": config.get("subtitle") if config else None,
             "calibration": ({"scale": config.get("scale", 1.0), "offset": config.get("offset", 0.0),
                              "anchor_count": len(config.get("anchors") or [])} if config else None),
-            "style": self._settings(),
+            "style": settings,
+            "positioning": self._positioning_metadata(settings),
             "mock": self.mock,
         })

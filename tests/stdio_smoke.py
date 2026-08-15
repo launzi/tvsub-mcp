@@ -36,6 +36,11 @@ def main() -> int:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env={
+                **os.environ,
+                "TVSUB_MOCK_AS_ELAPSED": "300.1",
+                "TVSUB_MOCK_AS_STATE": "paused",
+            },
         )
         assert process.stdin and process.stdout and process.stderr
         selector = selectors.DefaultSelector()
@@ -83,6 +88,10 @@ def main() -> int:
         }
         if set(names) != expected:
             raise AssertionError(f"tool catalog mismatch: {names}")
+        catalog = {item["name"]: item for item in listed["result"]["tools"]}
+        for name in ("set_style", "status"):
+            if "창" not in catalog[name].get("description", ""):
+                raise AssertionError(f"{name} window-relative description regression: {catalog[name]}")
 
         calls = [
             ("now_playing", {}),
@@ -90,7 +99,10 @@ def main() -> int:
             ("load_subtitle", {"subtitle": "sample.en.srt"}),
             ("translate_subtitle", {"subtitle": "sample.en.srt", "target_language": "ja", "dry_run": True}),
             ("list_fonts", {"language": "ja"}),
-            ("set_style", {"font_family": "Noto Sans CJK KR", "font_size": 52, "language": "ja"}),
+            ("set_style", {
+                "font_family": "Noto Sans CJK KR", "font_size": 52,
+                "bottom_margin": 0.09, "language": "ja",
+            }),
             ("start_overlay", {}),
             ("calibrate_sync", {"spoken_text": "First line", "actual_time": 70}),
             ("status", {}),
@@ -103,6 +115,22 @@ def main() -> int:
             if result.get("isError"):
                 raise RuntimeError(f"tool {name} failed: {result}")
             outcomes[name] = "PASS"
+            if name == "now_playing":
+                content = json.loads(result["content"][0]["text"])
+                if not content.get("sync_disagreement") or content.get("location_ms") != 300_100:
+                    raise AssertionError(f"AppleScript correction regression: {content}")
+            if name == "calibrate_sync":
+                content = json.loads(result["content"][0]["text"])
+                if content.get("anchor_recorded") is not False \
+                   or content.get("reason") != "mediaremote-applescript-disagreement":
+                    raise AssertionError(f"calibrate_sync fail-closed regression: {content}")
+            if name in {"set_style", "status"}:
+                content = json.loads(result["content"][0]["text"])
+                positioning = content.get("positioning") or {}
+                if positioning.get("reference") != "tv-video-window" \
+                   or positioning.get("bottom_margin_ratio") != 0.09 \
+                   or positioning.get("fallback") != "configured-screen":
+                    raise AssertionError(f"{name} positioning contract regression: {content}")
         process.stdin.close()
         process.wait(timeout=10)
         stderr = process.stderr.read()
