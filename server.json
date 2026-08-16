@@ -3,7 +3,7 @@
   "name": "io.github.launzi/tvsub-mcp",
   "title": "tvsub MCP",
   "description": "Control tvsub for Apple TV.app: subtitles, glossary-aware translation, overlay, styling, and sync.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "websiteUrl": "https://youngji.kim/tvsub",
   "repository": {
     "url": "https://github.com/launzi/tvsub-mcp",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "tvsub-mcp",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
