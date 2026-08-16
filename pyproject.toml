@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Apple TV.app subtitle overlay with Anthropic API, Claude subscription, and ChatGPT subscription translation"
 requires-python = ">=3.12"
 dependencies = [
-  "mcp>=1.2",
+  "mcp>=1.2,<2",
   "anthropic>=0.117",
 ]
 
