@@ -14,3 +14,6 @@ tvsub-mcp = "tvsub_mcp.server:main"
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tvsub_mcp*"]
