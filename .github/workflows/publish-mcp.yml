@@ -52,6 +52,8 @@ jobs:
 
       - name: Publish package to PyPI with trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
       - name: Wait for the package to become readable on PyPI
         run: |
