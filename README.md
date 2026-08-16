@@ -125,10 +125,11 @@ TVSUB_TEST_PYTHON="$PWD/.venv/bin/python" .venv/bin/python tests/stdio_smoke.py
 bash scripts/hygiene-check.sh
 ```
 
+Before tagging a release, run `bash scripts/preflight.sh` from the repository root.
+
 Linux can run the unit tests and mock stdio smoke test. Apple TV.app,
 MediaRemote, CoreText, and the real overlay require macOS.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
