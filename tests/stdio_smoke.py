@@ -84,6 +84,7 @@ def main() -> int:
         names = [item["name"] for item in listed["result"]["tools"]]
         expected = {
             "now_playing", "list_subtitles", "load_subtitle", "translate_subtitle",
+            "set_glossary", "mark_reviewed",
             "start_overlay", "stop_overlay", "list_fonts", "set_style", "calibrate_sync", "status",
         }
         if set(names) != expected:
