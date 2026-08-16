@@ -18,6 +18,12 @@ The server does not download subtitles, bypass DRM, modify video, or launch
 TV.app. You provide subtitle files that you have the right to use and start
 playback yourself.
 
+## Two directions, one workflow
+
+If a foreign, classic, or multilingual film you purchased in Apple TV.app does not include Korean—or another language you need—bring a lawfully obtained subtitle file, translate it with your Claude or ChatGPT subscription, and display it as an overlay. The same workflow works in the other direction: viewers worldwide can translate lawfully obtained subtitles for Korean films and series into their own language.
+
+Apple TV.app에서 구매한 외화·고전·다국어 영화에 한국어 또는 원하는 언어 자막이 없다면, 정당하게 보유한 자막 파일을 불러와 Claude나 ChatGPT 구독으로 번역한 뒤 오버레이로 표시할 수 있습니다. 같은 방식으로 전 세계 시청자도 한국 영화와 시리즈의 정당하게 보유한 자막을 자신의 언어로 번역해 시청할 수 있습니다.
+
 ## Requirements
 
 - macOS
