@@ -11,7 +11,7 @@ from typing import Callable
 
 from .subtitles import SubtitleDocument, load_subtitle, validate_timeline, write_srt
 from .glossary import load_glossary, prompt_glossary
-from .backends import cli_prompt, run_cli_batch, select_backend
+from .backends import SelectedBackend, cli_prompt, run_cli_batch, select_backend
 
 MODEL = "claude-sonnet-5"
 # 표준가 $3/$15 per MTok. 단 2026-08-31까지는 도입가 $2/$10이 적용된다
@@ -167,8 +167,14 @@ def translate(
         if not selected:
             raise ValueError("지정 시간과 겹치는 자막 큐가 없습니다.")
     partial = line_range is not None or time_range is not None
-    selected_backend = select_backend(backend, api_key=os.getenv("ANTHROPIC_API_KEY"),
-                                      run=subprocess_run or subprocess.run)
+    try:
+        selected_backend = select_backend(backend, api_key=os.getenv("ANTHROPIC_API_KEY"),
+                                          run=subprocess_run or subprocess.run)
+    except RuntimeError:
+        if not dry_run:
+            raise
+        # dry-run은 추정만 하므로 백엔드가 없어도 진행한다 (선택 결과만 표시).
+        selected_backend = SelectedBackend("unavailable", model="claude-sonnet-5")
     cost_estimate = estimate_for_backend(document, batch_size, selected_backend.name)
     actual_model = selected_backend.model or "unknown"
     common = {
