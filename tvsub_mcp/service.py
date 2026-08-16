@@ -15,6 +15,8 @@ from typing import Any
 from .calibration import calculate
 from .subtitles import Cue, load_subtitle
 from .translation import translate
+from .glossary import glossary_path, validate_glossary
+from .translation import provenance_path
 
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$")
 DEFAULT_SETTINGS = {
@@ -272,6 +274,13 @@ class TvsubService:
             "subtitle2": None,
             "cd2Offset": 0,
             "smiClass": None,
+            "primaryLanguage": None,
+            "secondarySubtitle": None,
+            "secondarySmiClass": None,
+            "secondaryLanguage": None,
+            "secondaryScale": 1.0,
+            "secondaryOffset": 0.0,
+            "secondaryAnchors": [],
             "scale": 1.0,
             "offset": 0.0,
             "anchors": [],
@@ -296,7 +305,8 @@ class TvsubService:
                     config["title"] = playback.get("title")
             except Exception:
                 pass
-        config["subtitle"] = str(path)
+        # Swift config 계약: 이식 가능한 tvsub 루트 상대경로만 저장한다.
+        config["subtitle"] = path.relative_to(self.root).as_posix()
         if reset_anchors:
             config["anchors"] = []
             config["scale"] = 1.0
@@ -314,6 +324,11 @@ class TvsubService:
         force: bool = False,
         batch_size: int = 40,
         glossary: str = "",
+        line_start: int = 0,
+        line_end: int = 0,
+        time_start: float = -1,
+        time_end: float = -1,
+        backend: str | None = None,
     ) -> dict:
         source = self._resolve_subtitle(subtitle)
         try:
@@ -324,10 +339,57 @@ class TvsubService:
                 force=force,
                 batch_size=batch_size,
                 glossary=glossary,
+                line_range=(line_start, line_end) if line_start or line_end else None,
+                time_range=(time_start, time_end) if time_start >= 0 or time_end >= 0 else None,
+                backend=backend,
             )
         except Exception as exc:
             raise RuntimeError(self._public_error(exc)) from exc
         return self._public_payload(result)
+
+    def set_glossary(self, subtitle: str, glossary: dict) -> dict:
+        source = self._resolve_subtitle(subtitle)
+        payload = validate_glossary(glossary)
+        path = glossary_path(source)
+        _atomic_json(path, payload)
+        return {"updated": True, "glossary": self._relative_path(path), "entries": {
+            "names": len(payload["names"]), "relationships": len(payload["relationships"]),
+            "terms": len(payload["terms"]),
+            "forbidden_translations": len(payload["forbidden_translations"]),
+        }}
+
+    def mark_reviewed(self, subtitle: str) -> dict:
+        output = self._resolve_subtitle(subtitle)
+        path = provenance_path(output)
+        if not path.exists():
+            raise FileNotFoundError(f"provenance 파일이 없습니다: {self._relative_path(path)}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["status"] = "user_reviewed"
+        payload["reviewed_at"] = datetime.now(UTC).isoformat()
+        _atomic_json(path, payload)
+        # v0.2 metadata와 provenance가 같은 출력에 공존하면 상태도 함께 맞춘다.
+        legacy = output.with_suffix(output.suffix + ".translation.json")
+        if legacy.exists():
+            _atomic_json(legacy, payload)
+        return {"updated": True, "subtitle": self._relative_path(output),
+                "provenance": self._relative_path(path), "status": "user_reviewed"}
+
+    def _provenance_for(self, subtitle_value: str | None) -> dict | None:
+        if not subtitle_value:
+            return None
+        candidate = Path(subtitle_value)
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        path = provenance_path(candidate)
+        if not path.exists():
+            return {"status": "untracked", "path": self._relative_path(path)}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return {"status": payload.get("status", "untracked"), "model": payload.get("model"),
+                    "path": self._relative_path(path), "source_sha256": payload.get("source_sha256"),
+                    "glossary_sha256": payload.get("glossary_sha256")}
+        except (OSError, ValueError):
+            return {"status": "invalid", "path": self._relative_path(path)}
 
     def _settings(self) -> dict:
         if self.settings_path.exists():
@@ -579,7 +641,7 @@ class TvsubService:
         config = self._movie_config(movie_id)
         if not config.get("subtitle"):
             raise ValueError("선택된 자막이 없습니다.")
-        document = load_subtitle(config["subtitle"], config.get("smiClass"))
+        document = load_subtitle(self.root / config["subtitle"], config.get("smiClass"))
         cue: Cue | None = None
         if subtitle_time >= 0:
             cue = min(document.cues, key=lambda item: abs(item.start - subtitle_time))
@@ -651,6 +713,7 @@ class TvsubService:
             "overlay": self.overlay_status(),
             "now_playing": playback,
             "subtitle": config.get("subtitle") if config else None,
+            "provenance": self._provenance_for(config.get("subtitle") if config else None),
             "calibration": ({"scale": config.get("scale", 1.0), "offset": config.get("offset", 0.0),
                              "anchor_count": len(config.get("anchors") or [])} if config else None),
             "style": settings,

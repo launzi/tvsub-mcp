@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import tempfile
 import unittest
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -22,6 +24,17 @@ Late line
 
 
 class ServiceTests(unittest.TestCase):
+    @patch("tvsub_mcp.backends.executable_for", return_value="/bin/claude")
+    def test_translate_uses_backend_from_environment_when_argument_is_omitted(self, _executable) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "subtitles").mkdir()
+            (root / "subtitles" / "sample.srt").write_text(SRT, encoding="utf-8")
+            service = TvsubService(root, mock=True)
+            with patch.dict(os.environ, {"TVSUB_TRANSLATE_BACKEND": "claude"}, clear=False):
+                result = service.translate_subtitle("sample.srt", dry_run=True)
+            self.assertEqual(result["backend"], "claude")
+
     def test_cross_source_threshold_matches_swift_rule(self) -> None:
         self.assertTrue(should_use_applescript_position(35.8, 300.1))
         self.assertFalse(should_use_applescript_position(100.0, 101.999))
@@ -177,6 +190,44 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 service.load_subtitle("broken.srt", "movie-1")
             self.assertNotIn(str(root), str(caught.exception))
+
+    def test_glossary_and_reviewed_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "subtitles").mkdir()
+            source = root / "subtitles" / "show.ko.srt"
+            source.write_text(SRT, encoding="utf-8")
+            service = TvsubService(root, mock=True)
+            result = service.set_glossary("show.ko.srt", {
+                "names": {"철수": "Cheol-su"},
+                "relationships": [{"from": "철수", "to": "영희", "speech": "banmal"}],
+                "terms": {"김치찌개": "kimchi jjigae"},
+                "forbidden_translations": ["kimchi stew"],
+            })
+            self.assertEqual(result["glossary"], "subtitles/show.glossary.json")
+            output = root / "subtitles" / "show.en.srt"
+            output.write_text(SRT, encoding="utf-8")
+            provenance = output.with_suffix(".srt.provenance.json")
+            provenance.write_text(json.dumps({"status": "ai_draft", "model": "fixture"}), encoding="utf-8")
+            reviewed = service.mark_reviewed("show.en.srt")
+            self.assertEqual(reviewed["status"], "user_reviewed")
+            self.assertEqual(json.loads(provenance.read_text())["status"], "user_reviewed")
+
+    def test_status_exposes_loaded_subtitle_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "subtitles").mkdir()
+            subtitle = root / "subtitles" / "sample.srt"
+            subtitle.write_text(SRT, encoding="utf-8")
+            service = TvsubService(root, mock=True)
+            service.load_subtitle("sample.srt", "fixture-movie-001")
+            subtitle.with_suffix(".srt.provenance.json").write_text(
+                json.dumps({"status": "ai_draft", "model": "fixture", "source_sha256": "abc"}),
+                encoding="utf-8",
+            )
+            status = service.status()
+            self.assertEqual(status["provenance"]["status"], "ai_draft")
+            self.assertEqual(status["provenance"]["model"], "fixture")
 
 
 if __name__ == "__main__":

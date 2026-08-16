@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from .service import TvsubService
+
+KEYCHAIN_SERVICE = "kim.youngji.tvsub.anthropic"
 
 
 def _load_env(env_path: Path) -> None:
@@ -24,11 +27,28 @@ def _load_env(env_path: Path) -> None:
             return
 
 
+def _load_keychain_key() -> None:
+    """Use the same generic-password service as Swift TranslationKeychain."""
+    if "ANTHROPIC_API_KEY" in os.environ or sys.platform != "darwin":
+        return
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    value = result.stdout.strip()
+    if result.returncode == 0 and value:
+        os.environ["ANTHROPIC_API_KEY"] = value
+
+
 def build_server(service: TvsubService) -> FastMCP:
     mcp = FastMCP(
         "tvsub",
         instructions=(
-            "Apple TV.app의 현재 재생 항목을 확인하고 자막 선택·LLM 번역·오버레이·폰트·싱크를 제어합니다. "
+            "macOS Apple TV.app의 구매·대여 영화에서 SRT/SMI/SAMI/VTT 자막 선택, "
+            "Anthropic API·Claude 구독·ChatGPT 구독 번역, 오버레이·폰트·싱크를 제어합니다. "
             "TV.app을 직접 실행하지 말고, 사용자가 재생을 시작한 뒤 도구를 호출하세요."
         ),
     )
@@ -45,7 +65,10 @@ def build_server(service: TvsubService) -> FastMCP:
     def load_subtitle(subtitle: str, store_id: str = "", reset_anchors: bool = False) -> dict:
         return service.load_subtitle(subtitle, store_id, reset_anchors)
 
-    @mcp.tool(description="Claude Sonnet 5로 자막을 임의 언어로 번역합니다. 타임코드·큐 수를 검증하고 캐시합니다.")
+    @mcp.tool(description=(
+        "Anthropic API, Claude 구독(Claude Code CLI), ChatGPT 구독(Codex CLI) 중 선택해 자막을 번역합니다. "
+        "backend는 auto/api/claude/codex이며 타임코드·큐 수 검증, 캐시, provenance를 공통 적용합니다."
+    ))
     def translate_subtitle(
         subtitle: str,
         target_language: str = "ko",
@@ -53,8 +76,22 @@ def build_server(service: TvsubService) -> FastMCP:
         force: bool = False,
         batch_size: int = 40,
         glossary: str = "",
+        line_start: int = 0,
+        line_end: int = 0,
+        time_start: float = -1,
+        time_end: float = -1,
+        backend: str = "",
     ) -> dict:
-        return service.translate_subtitle(subtitle, target_language, dry_run, force, batch_size, glossary)
+        return service.translate_subtitle(subtitle, target_language, dry_run, force, batch_size, glossary,
+                                          line_start, line_end, time_start, time_end, backend or None)
+
+    @mcp.tool(description="작품 자막 옆 `<작품>.glossary.json`을 생성·수정합니다.")
+    def set_glossary(subtitle: str, glossary: dict) -> dict:
+        return service.set_glossary(subtitle, glossary)
+
+    @mcp.tool(description="번역 SRT의 provenance 상태를 user_reviewed로 갱신합니다.")
+    def mark_reviewed(subtitle: str) -> dict:
+        return service.mark_reviewed(subtitle)
 
     @mcp.tool(description=(
         "tvsub NSPanel 오버레이를 선택 자막·스타일로 시작합니다. "
@@ -140,6 +177,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     project_root = Path(__file__).resolve().parent.parent
     _load_env(project_root / ".env")
+    _load_keychain_key()
     service = TvsubService(args.tvsub_root, mock=args.mock)
     print(f"[tvsub-mcp] mock={service.mock}", file=sys.stderr, flush=True)
     build_server(service).run(transport="stdio")

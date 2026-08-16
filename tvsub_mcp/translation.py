@@ -3,11 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 from .subtitles import SubtitleDocument, load_subtitle, validate_timeline, write_srt
+from .glossary import load_glossary, prompt_glossary
+from .backends import cli_prompt, run_cli_batch, select_backend
 
 MODEL = "claude-sonnet-5"
 # 표준가 $3/$15 per MTok. 단 2026-08-31까지는 도입가 $2/$10이 적용된다
@@ -35,7 +39,10 @@ def estimate(document: SubtitleDocument, batch_size: int) -> dict:
     chars = sum(len(cue.flat_text) for cue in document.cues)
     batches = max(1, (len(document.cues) + batch_size - 1) // batch_size)
     input_tokens = round(chars / 3 + batches * 750)
-    output_tokens = round(chars / 2)
+    # Korean->English E2E (2026-08-16): 10 cues produced 2,027 output tokens
+    # from 1,162 actual input tokens, while the old estimate was only 86.
+    # Cover both observed ratios: 1.8x input and 210 tokens/cue (rounded up).
+    output_tokens = max(round(input_tokens * 1.8), len(document.cues) * 210)
     input_price = float(os.getenv("TVSUB_PRICE_INPUT_PER_MTOK", DEFAULT_INPUT_PRICE_PER_MTOK))
     output_price = float(os.getenv("TVSUB_PRICE_OUTPUT_PER_MTOK", DEFAULT_OUTPUT_PRICE_PER_MTOK))
     usd = input_tokens * input_price / 1_000_000 + output_tokens * output_price / 1_000_000
@@ -49,6 +56,14 @@ def estimate(document: SubtitleDocument, batch_size: int) -> dict:
             "note": "Sonnet 기준 기본 추정치이며 환경변수로 최신 가격을 덮어쓸 수 있습니다.",
         },
     }
+
+
+def estimate_for_backend(document: SubtitleDocument, batch_size: int, backend: str) -> dict:
+    value = estimate(document, batch_size)
+    if backend != "api":
+        value["usd"] = 0.0
+        value["price_basis"] = {"note": "구독 포함"}
+    return value
 
 
 def _system_prompt(target: str) -> str:
@@ -102,6 +117,14 @@ def _source_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def provenance_path(output_path: Path) -> Path:
+    return output_path.with_suffix(output_path.suffix + ".provenance.json")
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def translate(
     source_path: Path,
     target_language: str,
@@ -112,7 +135,11 @@ def translate(
     batch_size: int = 40,
     context: int = 6,
     glossary: str = "",
+    line_range: tuple[int, int] | None = None,
+    time_range: tuple[float, float] | None = None,
     client_factory: Callable | None = None,
+    backend: str | None = None,
+    subprocess_run: Callable | None = None,
 ) -> dict:
     if batch_size < 1 or batch_size > 100:
         raise ValueError("batch_size는 1~100이어야 합니다.")
@@ -121,63 +148,109 @@ def translate(
     output_path = output_path or source_path.with_name(f"{source_path.stem}.{tag}.srt")
     metadata_path = output_path.with_suffix(output_path.suffix + ".translation.json")
     source_hash = _source_hash(source_path)
-    cost_estimate = estimate(document, batch_size)
+    glossary_file, glossary_payload, glossary_hash = load_glossary(source_path)
+    effective_glossary = prompt_glossary(glossary_payload)
+    if glossary.strip():
+        effective_glossary += ("\n\n[호출 시 추가 지침]\n" + glossary.strip())
+    selected = list(range(len(document.cues)))
+    if line_range is not None:
+        first, last = line_range
+        if first < 1 or last < first or last > len(document.cues):
+            raise ValueError(f"line_range는 1~{len(document.cues)} 안의 포함 범위여야 합니다.")
+        selected = list(range(first - 1, last))
+    if time_range is not None:
+        start_time, end_time = time_range
+        if start_time < 0 or end_time <= start_time:
+            raise ValueError("time_range는 0 이상이며 끝이 시작보다 커야 합니다.")
+        selected = [i for i, cue in enumerate(document.cues)
+                    if cue.start < end_time and cue.end > start_time]
+        if not selected:
+            raise ValueError("지정 시간과 겹치는 자막 큐가 없습니다.")
+    partial = line_range is not None or time_range is not None
+    selected_backend = select_backend(backend, api_key=os.getenv("ANTHROPIC_API_KEY"),
+                                      run=subprocess_run or subprocess.run)
+    cost_estimate = estimate_for_backend(document, batch_size, selected_backend.name)
+    actual_model = selected_backend.model or "unknown"
     common = {
         "source": str(source_path),
         "output": str(output_path),
         "target_language": tag,
-        "model": MODEL,
+        "model": actual_model,
+        "backend": selected_backend.name,
         "cue_count": len(document.cues),
         "cost_estimate": cost_estimate,
+        "glossary": str(glossary_file) if glossary_payload else None,
+        "glossary_applied": glossary_payload is not None or bool(glossary.strip()),
+        "partial": partial,
     }
     if dry_run:
         return {**common, "dry_run": True, "api_called": False, "cached": False}
 
-    if not force and output_path.exists() and metadata_path.exists():
+    if not partial and not force and output_path.exists() and metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("source_sha256") == source_hash and metadata.get("target_language") == tag \
-                and metadata.get("model") == MODEL:
+                and metadata.get("backend", "api") == selected_backend.name \
+                and metadata.get("model", MODEL) == actual_model \
+                and metadata.get("glossary_sha256") == glossary_hash:
             validate_timeline(document, load_subtitle(output_path))
             return {**common, "dry_run": False, "api_called": False, "cached": True,
                     "actual_usage": metadata.get("actual_usage")}
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY가 없습니다. 실행 환경 또는 tvsub MCP 프로젝트 루트의 .env에 설정하세요."
-        )
-    if client_factory is None:
-        from anthropic import Anthropic
-        client_factory = Anthropic
-    client = client_factory()
-    translated: dict[int, str] = {}
+    client = None
+    if selected_backend.name == "api":
+        if client_factory is None:
+            from anthropic import Anthropic
+            client_factory = Anthropic
+        client = client_factory()
+    if partial:
+        if not output_path.exists():
+            raise FileNotFoundError("부분 재번역 대상 출력 SRT가 없습니다. 먼저 전체 번역을 실행하세요.")
+        existing = load_subtitle(output_path)
+        validate_timeline(document, existing)
+        translated: dict[int, str] = {i: cue.text for i, cue in enumerate(existing.cues, 1)}
+    else:
+        translated = {}
     input_tokens = output_tokens = 0
     started = time.monotonic()
-    for start in range(0, len(document.cues), batch_size):
-        stop = min(len(document.cues), start + batch_size)
+    groups: list[tuple[int, int]] = []
+    for index in selected:
+        if not groups or index != groups[-1][1]:
+            groups.append((index, index + 1))
+        else:
+            groups[-1] = (groups[-1][0], index + 1)
+    batches = [(start, min(stop, start + batch_size)) for group_start, group_stop in groups
+               for start in range(group_start, group_stop, batch_size)
+               for stop in [group_stop]]
+    for start, stop in batches:
         expected = set(range(start + 1, stop + 1))
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(3 if selected_backend.name == "api" else 1):
             try:
-                response = client.messages.create(
-                    model=MODEL,
-                    max_tokens=16000,
-                    system=_system_prompt(tag),
-                    output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-                    messages=[{"role": "user", "content": _message(document, start, stop, context, glossary)}],
-                )
-                text_block = next(block.text for block in response.content if block.type == "text")
-                payload = json.loads(text_block)
+                if selected_backend.name == "api":
+                    response = client.messages.create(
+                        model=MODEL, max_tokens=16000, system=_system_prompt(tag),
+                        output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
+                        messages=[{"role": "user", "content": _message(document, start, stop, context, effective_glossary)}],
+                    )
+                    text_block = next(block.text for block in response.content if block.type == "text")
+                    payload = json.loads(text_block)
+                    input_tokens += int(response.usage.input_tokens)
+                    output_tokens += int(response.usage.output_tokens)
+                else:
+                    prompt = cli_prompt(_system_prompt(tag), _message(document, start, stop, context, effective_glossary))
+                    payload, detected_model = run_cli_batch(selected_backend, prompt, run=subprocess_run or subprocess.run)
+                    if detected_model:
+                        actual_model = detected_model
                 got = {int(item["id"]): item["text"] for item in payload["translations"]}
                 if set(got) != expected:
                     raise ValueError(f"큐 id 불일치: 기대 {sorted(expected)}, 실제 {sorted(got)}")
                 translated.update(got)
-                input_tokens += int(response.usage.input_tokens)
-                output_tokens += int(response.usage.output_tokens)
                 break
             except Exception as exc:  # API/shape failures are retried as one batch.
                 last_error = exc
-                if attempt == 2:
-                    raise RuntimeError(f"번역 배치 {start + 1}~{stop}가 3회 실패했습니다: {exc}") from exc
+                if attempt == (2 if selected_backend.name == "api" else 0):
+                    detail = "3회" if selected_backend.name == "api" else "실행/검증 중"
+                    raise RuntimeError(f"번역 배치 {start + 1}~{stop}가 {detail} 실패했습니다: {exc}") from exc
                 time.sleep(attempt + 1)
         if last_error is not None and not expected.issubset(translated):
             raise last_error
@@ -186,8 +259,8 @@ def translate(
     write_srt(document.cues, translated, output_path)
     output_document = load_subtitle(output_path)
     validate_timeline(document, output_document)
-    input_price = cost_estimate["price_basis"]["input_usd_per_mtok"]
-    output_price = cost_estimate["price_basis"]["output_usd_per_mtok"]
+    input_price = cost_estimate["price_basis"].get("input_usd_per_mtok", 0)
+    output_price = cost_estimate["price_basis"].get("output_usd_per_mtok", 0)
     actual_usage = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -195,12 +268,35 @@ def translate(
         "elapsed_seconds": round(time.monotonic() - started, 2),
     }
     metadata = {
+        "schema_version": 1,
+        "status": "ai_draft",
         "source_sha256": source_hash,
+        "glossary_sha256": glossary_hash,
+        "glossary_path": glossary_file.name if glossary_payload else None,
         "target_language": tag,
-        "model": MODEL,
+        "model": actual_model,
+        "backend": selected_backend.name,
+        "actual_model": actual_model,
         "cue_count": len(document.cues),
+        "created_at": _utc_now(),
+        "translation_parameters": {"batch_size": batch_size, "context": context},
         "actual_usage": actual_usage,
+        "partial_updates": [],
     }
+    prov_path = provenance_path(output_path)
+    if partial and prov_path.exists():
+        previous = json.loads(prov_path.read_text(encoding="utf-8"))
+        metadata["created_at"] = previous.get("created_at", metadata["created_at"])
+        metadata["partial_updates"] = list(previous.get("partial_updates", []))
+        metadata["partial_updates"].append({
+            "at": _utc_now(),
+            "line_range": list(line_range) if line_range else None,
+            "time_range": list(time_range) if time_range else None,
+            "cue_ids": [i + 1 for i in selected],
+            "glossary_sha256": glossary_hash,
+        })
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    prov_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {**common, "dry_run": False, "api_called": True, "cached": False,
-            "timeline_verified": True, "actual_usage": actual_usage}
+            "timeline_verified": True, "actual_usage": actual_usage,
+            "provenance": str(prov_path), "status": "ai_draft"}
