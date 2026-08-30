@@ -2,6 +2,8 @@
 
 <!-- mcp-name: io.github.launzi/tvsub-mcp -->
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/launzi-tvsub-mcp-cp2qjl?variant=verified)](https://m8ven.ai/mcp/launzi-tvsub-mcp-cp2qjl)
+
 `tvsub-mcp` is the MCP companion for [tvsub](https://youngji.kim/tvsub), an
 experimental subtitle overlay for Apple TV.app on macOS. It lets an MCP client
 inspect the current playback item, choose or translate a subtitle file, adjust
