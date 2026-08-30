@@ -14,20 +14,6 @@ from .service import TvsubService
 KEYCHAIN_SERVICE = "kim.youngji.tvsub.anthropic"
 
 
-def _load_env(env_path: Path) -> None:
-    """Load only ANTHROPIC_API_KEY from the MCP project root's explicit .env file."""
-    if not env_path.is_file() or "ANTHROPIC_API_KEY" in os.environ:
-        return
-    for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key.strip() == "ANTHROPIC_API_KEY":
-            os.environ[key.strip()] = value.strip().strip("'\"")
-            return
-
-
 def _load_keychain_key() -> None:
     """Use the same generic-password service as Swift TranslationKeychain."""
     if "ANTHROPIC_API_KEY" in os.environ or sys.platform != "darwin":
@@ -212,8 +198,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    project_root = Path(__file__).resolve().parent.parent
-    _load_env(project_root / ".env")
     _load_keychain_key()
     service = TvsubService(args.tvsub_root, mock=args.mock)
     print(f"[tvsub-mcp] mock={service.mock}", file=sys.stderr, flush=True)
