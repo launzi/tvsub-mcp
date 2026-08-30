@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .service import TvsubService
 
@@ -53,19 +54,31 @@ def build_server(service: TvsubService) -> FastMCP:
         ),
     )
 
-    @mcp.tool(description="MediaRemote/JXA와 TV.app AppleScript 교차 검증으로 현재 제목, 콘텐츠 ID, 위치와 재생 상태를 조회합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Read current playback", readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description="MediaRemote/JXA와 TV.app AppleScript 교차 검증으로 현재 제목, 콘텐츠 ID, 위치와 재생 상태를 조회합니다.")
     def now_playing() -> dict:
         return service.now_playing()
 
-    @mcp.tool(description="tvsub subtitles/ 라이브러리의 SRT/SMI/VTT 파일과 파싱 정보를 나열합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="List subtitle files", readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description="tvsub subtitles/ 라이브러리의 SRT/SMI/VTT 파일과 파싱 정보를 나열합니다.")
     def list_subtitles() -> dict:
         return service.list_subtitles()
 
-    @mcp.tool(description="콘텐츠에 사용할 자막을 선택합니다. 기존 싱크 앵커는 기본적으로 보존합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Select subtitle", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ), description="콘텐츠에 사용할 자막을 선택합니다. 기존 싱크 앵커는 기본적으로 보존합니다.")
     def load_subtitle(subtitle: str, store_id: str = "", reset_anchors: bool = False) -> dict:
         return service.load_subtitle(subtitle, store_id, reset_anchors)
 
-    @mcp.tool(description=(
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Translate subtitle", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=False, openWorldHint=True,
+    ), description=(
         "Anthropic API, Claude 구독(Claude Code CLI), ChatGPT 구독(Codex CLI) 중 선택해 자막을 번역합니다. "
         "backend는 auto/api/claude/codex이며 타임코드·큐 수 검증, 캐시, provenance를 공통 적용합니다."
     ))
@@ -85,15 +98,24 @@ def build_server(service: TvsubService) -> FastMCP:
         return service.translate_subtitle(subtitle, target_language, dry_run, force, batch_size, glossary,
                                           line_start, line_end, time_start, time_end, backend or None)
 
-    @mcp.tool(description="작품 자막 옆 `<작품>.glossary.json`을 생성·수정합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Set title glossary", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ), description="작품 자막 옆 `<작품>.glossary.json`을 생성·수정합니다.")
     def set_glossary(subtitle: str, glossary: dict) -> dict:
         return service.set_glossary(subtitle, glossary)
 
-    @mcp.tool(description="번역 SRT의 provenance 상태를 user_reviewed로 갱신합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Mark reviewed", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description="번역 SRT의 provenance 상태를 user_reviewed로 갱신합니다.")
     def mark_reviewed(subtitle: str) -> dict:
         return service.mark_reviewed(subtitle)
 
-    @mcp.tool(description=(
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Start overlay", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description=(
         "tvsub NSPanel 오버레이를 선택 자막·스타일로 시작합니다. "
         "bottom_margin은 TV 영상 창 높이 기준이며 창을 찾지 못할 때만 설정 화면 기준으로 폴백합니다."
     ))
@@ -109,15 +131,24 @@ def build_server(service: TvsubService) -> FastMCP:
         return service.start_overlay(subtitle, store_id, font_family, font_size, color,
                                      outline_width, bottom_margin)
 
-    @mcp.tool(description="이 MCP 서버가 시작한 tvsub 오버레이 프로세스를 정상 종료합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Stop overlay", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description="이 MCP 서버가 시작한 tvsub 오버레이 프로세스를 정상 종료합니다.")
     def stop_overlay() -> dict:
         return service.stop_overlay()
 
-    @mcp.tool(description="macOS CoreText 설치 폰트를 열거하고 목표 언어 샘플 글리프 지원 여부를 확인합니다.")
+    @mcp.tool(annotations=ToolAnnotations(
+        title="List installed fonts", readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description="macOS CoreText 설치 폰트를 열거하고 목표 언어 샘플 글리프 지원 여부를 확인합니다.")
     def list_fonts(language: str = "ko") -> dict:
         return service.list_fonts(language)
 
-    @mcp.tool(description=(
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Set overlay style", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description=(
         "폰트·크기·색·외곽선·TV 영상 창 하단 위치를 저장하고 실행 중 오버레이에 즉시 반영합니다. "
         "outline_width는 pt가 아니라 **폰트 크기 대비 퍼센트**입니다(5 = 5%). 4~7이 실용 범위이고, "
         "10을 넘기면 글자 속까지 외곽선 색으로 덮여 읽기 어려워집니다. "
@@ -141,7 +172,10 @@ def build_server(service: TvsubService) -> FastMCP:
             max_lines=max_lines, language=language,
         )
 
-    @mcp.tool(description=(
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Calibrate sync anchor", readOnlyHint=False, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description=(
         "현재 대사와 일시정지 위치로 영화별 싱크 앵커를 기록하고 2점 scale+offset을 계산합니다. "
         "권장 경로는 spoken_text(지금 들린 대사 일부)입니다. "
         "⚠ subtitle_time은 **자막 파일 원본 시각**이며, tvsub CLI의 `anchor --raw-sub-time`과 같은 의미입니다. "
@@ -156,7 +190,10 @@ def build_server(service: TvsubService) -> FastMCP:
     ) -> dict:
         return service.calibrate_sync(spoken_text, subtitle_time, store_id, actual_time)
 
-    @mcp.tool(description=(
+    @mcp.tool(annotations=ToolAnnotations(
+        title="Summarize state", readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    ), description=(
         "오버레이, 재생 항목, 선택 자막, 싱크 보정, 스타일과 창 기준 위치 추적 계약을 한 번에 요약합니다."
     ))
     def status() -> dict:
