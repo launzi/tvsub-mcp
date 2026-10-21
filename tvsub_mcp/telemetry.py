@@ -11,7 +11,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib import request
@@ -96,16 +96,21 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
 class Telemetry:
     def __init__(
         self, path: Path | None = None, *, mock: bool = False,
-        today: Callable[[], date] = date.today,
+        today: Callable[[], date] | None = None,
     ) -> None:
         self.path = path if path is not None else (
             Path.home() / "Library" / "Application Support" / "tvsub" / "telemetry.json"
         )
         self.mock = mock
-        self._today = today
+        # UTC days, matching the collector, which only accepts days already complete in UTC.
+        self._today = today or _utc_today
         self._lock = threading.Lock()
 
     @property
