@@ -98,6 +98,37 @@ cue count, batch count, and estimated cost. Subscription backends report
 `$0 (included in subscription)`. Every translation writes a `.provenance.json`
 sidecar recording backend, hashes, and review status.
 
+## Usage statistics
+
+Starting with 0.2.3, anonymous usage statistics are **enabled by default**.
+The server stores a random installation ID (UUIDv4), daily tool and translation
+backend counts, and send dates in
+`~/Library/Application Support/tvsub/telemetry.json`. The first enabled run
+prints a notice to stderr; the `status` tool reports whether collection is enabled,
+what is sent, and how to disable it.
+
+On startup and after tool calls, the server checks for unsent days before today.
+It sends the oldest pending day in a background POST to
+`https://youngji.kim/api/tvsub/telemetry`, at most once per local calendar day.
+The timeout is 3 seconds. Failed attempts keep their counters and retry on the
+next eligible day; they do not interrupt tools. `TVSUB_TELEMETRY_URL` overrides
+the collector URL.
+
+The JSON contains only `install_id`, `day`, `tvsub_mcp_version`, `macos_version`
+(major.minor), `python_minor` (major.minor), `tools` (counts for the 12 tool names),
+and `backends` (counts for `api`, `claude`, `codex`, `pro`, or `auto`). An omitted
+or empty backend is counted as `auto`; this records the requested backend,
+not the backend eventually selected by translation. Statistics never include
+subtitle text, titles, content IDs, filenames, paths, glossaries, API keys,
+raw errors, or IP addresses in the payload.
+
+To disable both recording and sending, set **`TVSUB_TELEMETRY=0`**
+(`false`, `off`, and `no` also work, case-insensitively), or **`DO_NOT_TRACK=1`**
+in the MCP server's environment. For example, add `--env TVSUB_TELEMETRY=0`
+to the `claude mcp add` command before `tvsub`. Mock mode (`--mock` or
+`TVSUB_MCP_MOCK=1`) and tests always disable statistics. Disabling leaves any
+existing local counters untouched; no statistics are recorded or sent while disabled.
+
 ## Important notices
 
 - **Experimental software:** expect rough edges and breaking changes. Keep a

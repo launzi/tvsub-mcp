@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import subprocess
 import sys
+from functools import wraps
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from .service import TvsubService
+from .telemetry import Telemetry
 
 KEYCHAIN_SERVICE = "kim.youngji.tvsub.anthropic"
 
@@ -30,7 +33,30 @@ def _load_keychain_key() -> None:
         os.environ["ANTHROPIC_API_KEY"] = value
 
 
-def build_server(service: TvsubService) -> FastMCP:
+def build_server(service: TvsubService, *, telemetry: Telemetry | None = None) -> FastMCP:
+    telemetry = telemetry if telemetry is not None else Telemetry(mock=service.mock)
+    telemetry.start()
+
+    def tracked(function):
+        signature = inspect.signature(function)
+
+        @wraps(function)
+        def call(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            finally:
+                # Only the fixed tool name and a backend enum reach telemetry.
+                # Never pass arguments, results or exception text to the collector.
+                try:
+                    backend = ""
+                    if function.__name__ == "translate_subtitle":
+                        backend = signature.bind(*args, **kwargs).arguments.get("backend", "")
+                    telemetry.record(function.__name__, backend)
+                except Exception:
+                    pass
+
+        return call
+
     mcp = FastMCP(
         "tvsub",
         instructions=(
@@ -44,6 +70,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="Read current playback", readOnlyHint=True, destructiveHint=False,
         idempotentHint=True, openWorldHint=False,
     ), description="MediaRemote/JXA와 TV.app AppleScript 교차 검증으로 현재 제목, 콘텐츠 ID, 위치와 재생 상태를 조회합니다.")
+    @tracked
     def now_playing() -> dict:
         return service.now_playing()
 
@@ -51,6 +78,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="List subtitle files", readOnlyHint=True, destructiveHint=False,
         idempotentHint=True, openWorldHint=False,
     ), description="tvsub subtitles/ 라이브러리의 SRT/SMI/VTT 파일과 파싱 정보를 나열합니다.")
+    @tracked
     def list_subtitles() -> dict:
         return service.list_subtitles()
 
@@ -58,6 +86,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="Select subtitle", readOnlyHint=False, destructiveHint=True,
         idempotentHint=True, openWorldHint=False,
     ), description="콘텐츠에 사용할 자막을 선택합니다. 기존 싱크 앵커는 기본적으로 보존합니다.")
+    @tracked
     def load_subtitle(subtitle: str, store_id: str = "", reset_anchors: bool = False) -> dict:
         return service.load_subtitle(subtitle, store_id, reset_anchors)
 
@@ -68,6 +97,7 @@ def build_server(service: TvsubService) -> FastMCP:
         "Anthropic API, Claude 구독(Claude Code CLI), ChatGPT 구독(Codex CLI) 중 선택해 자막을 번역합니다. "
         "backend는 auto/api/claude/codex이며 타임코드·큐 수 검증, 캐시, provenance를 공통 적용합니다."
     ))
+    @tracked
     def translate_subtitle(
         subtitle: str,
         target_language: str = "ko",
@@ -88,6 +118,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="Set title glossary", readOnlyHint=False, destructiveHint=True,
         idempotentHint=True, openWorldHint=False,
     ), description="작품 자막 옆 `<작품>.glossary.json`을 생성·수정합니다.")
+    @tracked
     def set_glossary(subtitle: str, glossary: dict) -> dict:
         return service.set_glossary(subtitle, glossary)
 
@@ -95,6 +126,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="Mark reviewed", readOnlyHint=False, destructiveHint=False,
         idempotentHint=True, openWorldHint=False,
     ), description="번역 SRT의 provenance 상태를 user_reviewed로 갱신합니다.")
+    @tracked
     def mark_reviewed(subtitle: str) -> dict:
         return service.mark_reviewed(subtitle)
 
@@ -105,6 +137,7 @@ def build_server(service: TvsubService) -> FastMCP:
         "tvsub NSPanel 오버레이를 선택 자막·스타일로 시작합니다. "
         "bottom_margin은 TV 영상 창 높이 기준이며 창을 찾지 못할 때만 설정 화면 기준으로 폴백합니다."
     ))
+    @tracked
     def start_overlay(
         subtitle: str = "",
         store_id: str = "",
@@ -121,6 +154,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="Stop overlay", readOnlyHint=False, destructiveHint=False,
         idempotentHint=True, openWorldHint=False,
     ), description="이 MCP 서버가 시작한 tvsub 오버레이 프로세스를 정상 종료합니다.")
+    @tracked
     def stop_overlay() -> dict:
         return service.stop_overlay()
 
@@ -128,6 +162,7 @@ def build_server(service: TvsubService) -> FastMCP:
         title="List installed fonts", readOnlyHint=True, destructiveHint=False,
         idempotentHint=True, openWorldHint=False,
     ), description="macOS CoreText 설치 폰트를 열거하고 목표 언어 샘플 글리프 지원 여부를 확인합니다.")
+    @tracked
     def list_fonts(language: str = "ko") -> dict:
         return service.list_fonts(language)
 
@@ -140,6 +175,7 @@ def build_server(service: TvsubService) -> FastMCP:
         "10을 넘기면 글자 속까지 외곽선 색으로 덮여 읽기 어려워집니다. "
         "bottom_margin은 TV 영상 창 높이 대비 비율(0.075 = 7.5%)이며 창 취득 실패 때만 화면 기준입니다."
     ))
+    @tracked
     def set_style(
         font_family: str = "",
         font_size: float = 0,
@@ -168,6 +204,7 @@ def build_server(service: TvsubService) -> FastMCP:
         "화면에 보인 시각(보정 적용 후)을 넣는 `anchor --sub-time`과 다르므로, "
         "이미 offset이 걸린 상태에서 화면 시각을 넣으면 앵커가 offset만큼 틀어집니다."
     ))
+    @tracked
     def calibrate_sync(
         spoken_text: str,
         subtitle_time: float = -1,
@@ -182,8 +219,9 @@ def build_server(service: TvsubService) -> FastMCP:
     ), description=(
         "오버레이, 재생 항목, 선택 자막, 싱크 보정, 스타일과 창 기준 위치 추적 계약을 한 번에 요약합니다."
     ))
+    @tracked
     def status() -> dict:
-        return service.status()
+        return {**service.status(), "telemetry": telemetry.status()}
 
     return mcp
 
