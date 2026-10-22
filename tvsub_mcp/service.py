@@ -63,6 +63,16 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _playback_identifiers(store_identifier: Any, content_item_identifier: Any) -> dict:
+    store = str(store_identifier) if store_identifier is not None else ""
+    item = str(content_item_identifier) if content_item_identifier is not None else ""
+    return {
+        "store_id": store or (f"item-{item}" if item else ""),
+        "store_identifier": store or None,
+        "content_item_identifier": item or None,
+    }
+
+
 class TvsubService:
     def __init__(self, tvsub_root: Path, *, mock: bool = False):
         self.root = tvsub_root.expanduser().resolve()
@@ -113,7 +123,10 @@ class TvsubService:
                     rate = 1.0 if os.getenv("TVSUB_MOCK_AS_STATE", "paused") == "playing" else 0.0
             return {
                 "title": os.getenv("TVSUB_MOCK_TITLE", "Example Movie (Mock)"),
-                "store_id": os.getenv("TVSUB_MOCK_STORE_ID", "fixture-movie-001"),
+                **_playback_identifiers(
+                    os.getenv("TVSUB_MOCK_STORE_ID", "fixture-movie-001"),
+                    os.getenv("TVSUB_MOCK_CONTENT_ITEM_ID"),
+                ),
                 "location_ms": round(elapsed * 1000),
                 "duration_ms": 8_609_152,
                 "is_playing": rate > 0.01,
@@ -183,10 +196,9 @@ class TvsubService:
                     source = "AppleScript/TV (MediaRemote disagreement)"
         return {
             "title": payload.get("kMRMediaRemoteNowPlayingInfoTitle"),
-            "store_id": str(
-                payload.get("kMRMediaRemoteNowPlayingInfoiTunesStoreIdentifier")
-                or payload.get("kMRMediaRemoteNowPlayingInfoContentItemIdentifier")
-                or ""
+            **_playback_identifiers(
+                payload.get("kMRMediaRemoteNowPlayingInfoiTunesStoreIdentifier"),
+                payload.get("kMRMediaRemoteNowPlayingInfoContentItemIdentifier"),
             ),
             "location_ms": round(max(0, elapsed) * 1000),
             "duration_ms": round(duration * 1000),
@@ -252,8 +264,10 @@ class TvsubService:
                                   "error": self._public_error(exc)})
         return {"library": self._relative_path(self.subtitles_dir), "count": len(items), "subtitles": items}
 
-    def _movie_id(self, store_id: str = "") -> str:
-        value = store_id.strip() or str(self.now_playing().get("store_id") or "")
+    def _movie_id(self, store_id: str = "", *, playback: dict | None = None) -> str:
+        if not store_id and playback is None:
+            playback = self.now_playing()
+        value = store_id or str((playback or {}).get("store_id") or "")
         if not value:
             raise ValueError("콘텐츠 ID를 확인할 수 없습니다. store_id를 지정하세요.")
         if "/" in value or "\\" in value or value in {".", ".."}:
@@ -261,10 +275,28 @@ class TvsubService:
         return value
 
     def _movie_path(self, store_id: str) -> Path:
-        return self.config_dir / f"movie-{store_id}.json"
+        return self.config_dir / f"movie-{self._movie_id(store_id)}.json"
 
-    def _movie_config(self, store_id: str) -> dict:
+    def _resolve_movie_config(self, store_id: str = "", *, playback: dict | None = None) -> tuple[str, dict]:
+        # Only a key resolved from this playback snapshot may migrate a legacy file.
+        if store_id:
+            playback = None
+        elif playback is None:
+            playback = self.now_playing()
+        movie_id = self._movie_id(store_id, playback=playback)
+        return movie_id, self._movie_config(movie_id, playback=playback)
+
+    def _movie_config(self, store_id: str, *, playback: dict | None = None) -> dict:
         path = self._movie_path(store_id)
+        if not path.exists() and playback is not None and store_id.startswith("item-"):
+            item = playback.get("content_item_identifier")
+            title = playback.get("title")
+            if not playback.get("store_identifier") and item and store_id == f"item-{item}" and title:
+                legacy = self._movie_path(str(item))
+                if legacy.is_file():
+                    config = json.loads(legacy.read_text(encoding="utf-8"))
+                    if config.get("title") and config["title"] == title:
+                        _atomic_json(path, {**config, "storeId": store_id})
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         return {
@@ -292,8 +324,7 @@ class TvsubService:
             document = load_subtitle(path)
         except Exception as exc:
             raise ValueError(self._public_error(exc)) from exc
-        movie_id = self._movie_id(store_id)
-        config = self._movie_config(movie_id)
+        movie_id, config = self._resolve_movie_config(store_id)
         config["storeId"] = movie_id
         if not config.get("title"):
             # 제목은 **지금 재생 중인 항목이 이 영화일 때만** 기록한다.
@@ -551,13 +582,13 @@ class TvsubService:
                 f"TV.app 재생 소스를 확인할 수 없습니다(bundle ID: {bundle_id}). "
                 "store_id를 지정해도 소스 검사는 우회하지 않습니다."
             )
-        movie_id = self._movie_id(store_id or str(playback.get("store_id") or ""))
+        movie_id, config = self._resolve_movie_config(store_id, playback=playback)
         if subtitle:
             self.load_subtitle(subtitle, movie_id)
+            config = self._movie_config(movie_id)
         if any([font_family, font_size, color, outline_width >= 0, bottom_margin >= 0]):
             self.set_style(font_family=font_family, font_size=font_size, color=color,
                            outline_width=outline_width, bottom_margin=bottom_margin)
-        config = self._movie_config(movie_id)
         if not config.get("subtitle"):
             raise ValueError("선택된 자막이 없습니다. load_subtitle을 먼저 호출하세요.")
         if self.mock:
@@ -637,8 +668,7 @@ class TvsubService:
         store_id: str = "",
         actual_time: float = -1,
     ) -> dict:
-        movie_id = self._movie_id(store_id)
-        config = self._movie_config(movie_id)
+        movie_id, config = self._resolve_movie_config(store_id)
         if not config.get("subtitle"):
             raise ValueError("선택된 자막이 없습니다.")
         document = load_subtitle(self.root / config["subtitle"], config.get("smiClass"))
@@ -707,7 +737,7 @@ class TvsubService:
         except Exception as exc:
             playback = {"available": False, "error": self._public_error(exc)}
             movie_id = ""
-        config = self._movie_config(movie_id) if movie_id else None
+        config = self._resolve_movie_config(playback=playback)[1] if movie_id else None
         settings = self._settings()
         return self._public_payload({
             "overlay": self.overlay_status(),
