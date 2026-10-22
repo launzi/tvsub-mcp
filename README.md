@@ -46,7 +46,7 @@ Replace `/absolute/path/to/tvsub` with the directory containing tvsub's
 brew install uv
 
 claude mcp add --transport stdio --scope user tvsub -- \
-  uvx tvsub-mcp==0.2.3 \
+  uvx tvsub-mcp==0.3.0 \
   --tvsub-root /absolute/path/to/tvsub
 
 claude mcp get tvsub
@@ -66,14 +66,14 @@ export ANTHROPIC_API_KEY="your-key"
 
 claude mcp add --transport stdio --scope user \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  tvsub -- uvx tvsub-mcp==0.2.3 \
+  tvsub -- uvx tvsub-mcp==0.3.0 \
   --tvsub-root /absolute/path/to/tvsub
 ```
 
 Other stdio MCP clients can launch the same command:
 
 ```bash
-uvx tvsub-mcp==0.2.3 --tvsub-root /absolute/path/to/tvsub
+uvx tvsub-mcp==0.3.0 --tvsub-root /absolute/path/to/tvsub
 ```
 
 ## Tools
